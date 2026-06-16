@@ -296,7 +296,16 @@ def chat():
                 'status': 'no_key'
             })
 
-        if 'buy' in ml or 'should' in ml:
+        long_range = any(w in ml for w in ['month', 'months', 'year', 'years', '6 month', 'half year'])
+
+        if long_range:
+            ai = (f"For <b>{name} ({sym})</b>, see the <b>30-Day</b> and <b>6-Month</b> estimates "
+                  f"in the AI Price Prediction section below. These are rough trend-based "
+                  f"extrapolations from the last 10 days of data — "
+                  f"<b>long-range forecasts like this carry low confidence</b> since real "
+                  f"prices are driven by earnings, news, and macro events this simple model "
+                  f"can't see. <b>This is NOT financial advice.</b>")
+        elif 'buy' in ml or 'should' in ml:
             ai = (f"Based on current data, {name} ({sym}) is trading at "
                   f"${price['price'] if price else 'N/A'}. "
                   f"Review the fundamentals and news sentiment below before deciding. "
@@ -358,3 +367,4 @@ if __name__ == '__main__':
     print(f"Finnhub API key:      {'SET ✓' if FINNHUB_API_KEY else 'MISSING ✗'}")
     print(f"AlphaVantage API key: {'SET ✓' if ALPHAVANTAGE_API_KEY else 'MISSING ✗'}")
     app.run(host='0.0.0.0', port=port, debug=False)
+    
