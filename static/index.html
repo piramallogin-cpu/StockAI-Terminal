@@ -138,6 +138,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--f
 .ddate{color:var(--sub);font-family:var(--mono)}
 .damt{color:var(--green);font-family:var(--mono);font-weight:600}
 .disc{margin:12px 16px 14px;background:#130e00;border:1px solid #92400e44;border-radius:8px;padding:9px 12px;display:flex;gap:8px}
+.ai-answer{background:linear-gradient(135deg,#0a1a2e,#0d1228);border:1px solid var(--accent2);border-radius:12px;padding:13px 16px;margin-bottom:10px;max-width:700px;width:100%;line-height:1.7;font-size:13.5px}
+.ai-answer .tag{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--accent2);margin-bottom:6px;display:flex;align-items:center;gap:5px}
 .disc-icon{font-size:12px;flex-shrink:0;margin-top:1px}
 .disc-text{font-size:10px;color:#ca8a0499;line-height:1.7}
 .disc-text b{color:#f59e0b}
@@ -285,12 +287,18 @@ function calcPrediction(prices){
   const pred1=+(last+slope).toFixed(2);
   const pred3=+(last+slope*3).toFixed(2);
   const pred7=+(last+slope*7).toFixed(2);
+  // Longer-range estimates use a dampened slope (trend naturally weakens over time)
+  // so 30-day/6-month figures don't blow up unrealistically from a 10-day slope.
+  const dampedSlope30=slope*0.6;
+  const dampedSlope180=slope*0.25;
+  const pred30=+(last+dampedSlope30*30).toFixed(2);
+  const pred180=+(last+dampedSlope180*180).toFixed(2);
   const trend=slope>0.5?'Bullish':slope<-0.5?'Bearish':'Neutral';
   let gains=0,losses=0;
   for(let i=1;i<n;i++){const d=prices[i]-prices[i-1];if(d>0)gains+=d;else losses+=Math.abs(d);}
   const rs=losses===0?100:gains/losses;
   const rsi=+(100-(100/(1+rs))).toFixed(1);
-  return{pred1,pred3,pred7,trend,sma3:+sma3.toFixed(2),sma5:+sma5.toFixed(2),rsi,slope:+slope.toFixed(2)};
+  return{pred1,pred3,pred7,pred30,pred180,trend,sma3:+sma3.toFixed(2),sma5:+sma5.toFixed(2),rsi,slope:+slope.toFixed(2)};
 }
 
 // 3. COMPARE TWO STOCKS (NEW)
@@ -371,7 +379,8 @@ function exportReport(){
     doc.setFont('helvetica','normal');doc.setFontSize(9);
     const rows=[
       ['Next Day Estimate','$'+pred.pred1],['3-Day Estimate','$'+pred.pred3],['7-Day Estimate','$'+pred.pred7],
-      ['SMA 3-Day','$'+pred.sma3],['SMA 5-Day','$'+pred.sma5],['RSI (14)',pred.rsi+(pred.rsi>70?' (Overbought)':pred.rsi<30?' (Oversold)':' (Neutral)')]
+      ['30-Day Estimate *','$'+pred.pred30],['6-Month Estimate *','$'+pred.pred180],['RSI (14)',pred.rsi+(pred.rsi>70?' (Overbought)':pred.rsi<30?' (Oversold)':' (Neutral)')],
+      ['SMA 3-Day','$'+pred.sma3],['SMA 5-Day','$'+pred.sma5]
     ];
     let rx=margin,ry=y,col=0;
     rows.forEach(([lab,val])=>{
@@ -380,7 +389,13 @@ function exportReport(){
       col++;
       if(col%3===0){col=0;rx=margin;ry+=30;}else{rx+=170;}
     });
-    y=ry+(col>0?30:0)+6;hr(y);y+=20;
+    y=ry+(col>0?30:0)+4;
+    doc.setFontSize(7.5);setColor([180,150,40]);
+    const noteLines=doc.splitTextToSize('* 30-day and 6-month figures extrapolate a 10-day trend and carry significantly lower confidence than short-term estimates.',pageW-margin*2);
+    doc.text(noteLines,margin,y);
+    y+=noteLines.length*10+8;
+    doc.setFontSize(9);
+    hr(y);y+=20;
   }
 
   // FUNDAMENTALS
@@ -466,7 +481,7 @@ function buildCardSections(data){
   let pos=0,neg=0,neu=0;
   (data.news||[]).forEach(n=>n.sentiment==='Positive'?pos++:n.sentiment==='Negative'?neg++:neu++);
   const total=pos+neg+neu||1;
-  const pred=data.chart_data?calcPrediction(data.chart_data.prices):null;
+  const pred=data.prediction||(data.chart_data?calcPrediction(data.chart_data.prices):null);
   data._pred=pred;
   lastCardData=data;
   const eb=document.getElementById('exportBtn');
@@ -492,7 +507,7 @@ function buildCardSections(data){
     const tc=pred.trend==='Bullish'?'trend-up':pred.trend==='Bearish'?'trend-dn':'trend-neu';
     const ti=pred.trend==='Bullish'?'📈':pred.trend==='Bearish'?'📉':'➡️';
     const rc=pred.rsi>70?'var(--red)':pred.rsi<30?'var(--green)':'var(--yellow)';
-    s3+=`<div class="pred-sec"><div class="sec-title"><span class="sec-bar" style="background:var(--accent2)"></span>🤖 AI Price Prediction (Moving Average Model)<span class="trend-badge ${tc}">${ti} ${pred.trend}</span></div><div class="pred-grid"><div class="pred-item"><div class="pred-label">Next Day Est.</div><div class="pred-val ${pred.pred1>=p.price?'up':'dn'}">$${pred.pred1}</div><div class="pred-sub">${pred.pred1>=p.price?'▲':'▼'} $${Math.abs(pred.pred1-p.price).toFixed(2)} from now</div></div><div class="pred-item"><div class="pred-label">3-Day Est.</div><div class="pred-val ${pred.pred3>=p.price?'up':'dn'}">$${pred.pred3}</div><div class="pred-sub">${pred.pred3>=p.price?'▲':'▼'} $${Math.abs(pred.pred3-p.price).toFixed(2)} from now</div></div><div class="pred-item"><div class="pred-label">7-Day Est.</div><div class="pred-val ${pred.pred7>=p.price?'up':'dn'}">$${pred.pred7}</div><div class="pred-sub">${pred.pred7>=p.price?'▲':'▼'} $${Math.abs(pred.pred7-p.price).toFixed(2)} from now</div></div><div class="pred-item"><div class="pred-label">SMA 3-Day</div><div class="pred-val" style="color:var(--accent)">$${pred.sma3}</div><div class="pred-sub">Short-term avg</div></div><div class="pred-item"><div class="pred-label">SMA 5-Day</div><div class="pred-val" style="color:var(--purple)">$${pred.sma5}</div><div class="pred-sub">Medium-term avg</div></div><div class="pred-item"><div class="pred-label">RSI Index</div><div class="pred-val" style="color:${rc}">${pred.rsi}</div><div class="pred-sub">${pred.rsi>70?'Overbought':pred.rsi<30?'Oversold':'Neutral zone'}</div></div></div></div>`;
+    s3+=`<div class="pred-sec"><div class="sec-title"><span class="sec-bar" style="background:var(--accent2)"></span>🤖 AI Price Prediction (Moving Average Model)<span class="trend-badge ${tc}">${ti} ${pred.trend}</span></div><div class="pred-grid"><div class="pred-item"><div class="pred-label">Next Day Est.</div><div class="pred-val ${pred.pred1>=p.price?'up':'dn'}">$${pred.pred1}</div><div class="pred-sub">${pred.pred1>=p.price?'▲':'▼'} $${Math.abs(pred.pred1-p.price).toFixed(2)} from now</div></div><div class="pred-item"><div class="pred-label">3-Day Est.</div><div class="pred-val ${pred.pred3>=p.price?'up':'dn'}">$${pred.pred3}</div><div class="pred-sub">${pred.pred3>=p.price?'▲':'▼'} $${Math.abs(pred.pred3-p.price).toFixed(2)} from now</div></div><div class="pred-item"><div class="pred-label">7-Day Est.</div><div class="pred-val ${pred.pred7>=p.price?'up':'dn'}">$${pred.pred7}</div><div class="pred-sub">${pred.pred7>=p.price?'▲':'▼'} $${Math.abs(pred.pred7-p.price).toFixed(2)} from now</div></div><div class="pred-item"><div class="pred-label">30-Day Est. *</div><div class="pred-val ${pred.pred30>=p.price?'up':'dn'}">$${pred.pred30}</div><div class="pred-sub">${pred.pred30>=p.price?'▲':'▼'} $${Math.abs(pred.pred30-p.price).toFixed(2)} · lower confidence</div></div><div class="pred-item"><div class="pred-label">6-Month Est. *</div><div class="pred-val ${pred.pred180>=p.price?'up':'dn'}">$${pred.pred180}</div><div class="pred-sub">${pred.pred180>=p.price?'▲':'▼'} $${Math.abs(pred.pred180-p.price).toFixed(2)} · low confidence</div></div><div class="pred-item"><div class="pred-label">RSI Index</div><div class="pred-val" style="color:${rc}">${pred.rsi}</div><div class="pred-sub">${pred.rsi>70?'Overbought':pred.rsi<30?'Oversold':'Neutral zone'}</div></div><div class="pred-item"><div class="pred-label">SMA 3-Day</div><div class="pred-val" style="color:var(--accent)">$${pred.sma3}</div><div class="pred-sub">Short-term avg</div></div><div class="pred-item"><div class="pred-label">SMA 5-Day</div><div class="pred-val" style="color:var(--purple)">$${pred.sma5}</div><div class="pred-sub">Medium-term avg</div></div></div><div style="font-size:9px;color:var(--muted);margin-top:10px;line-height:1.6">* 30-day and 6-month figures extrapolate a 10-day price trend and carry <b style="color:var(--yellow)">significantly lower confidence</b> than the short-term estimates above — real markets are affected by earnings, news, and macro events this simple model cannot see.</div></div>`;
   }
   if(p){s3+=`<div class="compare-sec"><div class="compare-label">⚖️ Compare with:</div><input class="compare-input" id="cmpInp" type="text" placeholder="e.g. MSFT" value="${data.compare_with||''}" onkeydown="if(event.key==='Enter')compareStock('${data.symbol}',${p.price})"><button class="compare-btn" onclick="compareStock('${data.symbol}',${p.price})">Compare ▶</button><div class="compare-result" id="cmpResult">${data.compare_with?`Pre-filled: ${data.compare_with} — click Compare`:'Type a symbol and click Compare'}</div></div>`;}
 
@@ -539,9 +554,21 @@ async function send(override){
       // Progressive reveal: price card -> chart -> prediction/compare -> fundamentals/news/dividends
       const row=document.createElement('div');row.className='row bot';
       const av=document.createElement('div');av.className='av bot';av.textContent='🤖';
-      const wrap=document.createElement('div');wrap.style.cssText='max-width:88%;';
+      const wrap=document.createElement('div');wrap.style.cssText='max-width:88%;display:flex;flex-direction:column;gap:0;';
+      row.append(av,wrap);msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
+
+      // Show the direct answer FIRST, prominently, before the data card
+      if(d.response){
+        const ansBox=document.createElement('div');
+        ansBox.className='ai-answer';
+        ansBox.innerHTML=`<div class="tag">🤖 AI Answer</div>${d.response}`;
+        wrap.appendChild(ansBox);
+        msgs.scrollTop=msgs.scrollHeight;
+        await wait(250);
+      }
+
       const card=document.createElement('div');card.className='scard';
-      wrap.appendChild(card);row.append(av,wrap);msgs.appendChild(row);msgs.scrollTop=msgs.scrollHeight;
+      wrap.appendChild(card);msgs.scrollTop=msgs.scrollHeight;
 
       const sections=buildCardSections(d);
 
@@ -573,8 +600,6 @@ async function send(override){
       // Step 4: fundamentals, news, dividends, disclaimer
       card.insertAdjacentHTML('beforeend', sections.s4);
       msgs.scrollTop=msgs.scrollHeight;
-
-      if(d.response)addRow(d.response,'bot');
     }else{addRow(d.response||'No data found.','bot');}
   }catch(e){ld.remove();addRow('Connection error. Make sure server is running.','bot');}
   finally{btn.disabled=false;inp.disabled=false;inp.focus();}

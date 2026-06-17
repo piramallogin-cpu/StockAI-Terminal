@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 import requests
 from datetime import datetime, timedelta
 import os
+import re
 
 app = Flask(__name__, static_folder='static')
 
@@ -122,6 +123,42 @@ def get_history(sym):
         return None
 
 
+def calc_prediction(prices):
+    """Simple moving-average / trend model — mirrors the frontend JS so backend
+    chat text and the on-screen prediction card always agree with each other."""
+    if not prices or len(prices) < 3:
+        return None
+    n = len(prices)
+    sma3 = sum(prices[-3:]) / 3
+    sma5 = sum(prices[-5:]) / 5 if n >= 5 else sma3
+    recent = prices[-min(5, n):]
+    slope = (recent[-1] - recent[0]) / len(recent)
+    last = prices[-1]
+    pred1   = round(last + slope, 2)
+    pred3   = round(last + slope * 3, 2)
+    pred7   = round(last + slope * 7, 2)
+    # Dampen the slope for longer horizons — a 10-day trend shouldn't be
+    # extrapolated at full strength out to 30 days or 6 months.
+    pred30  = round(last + slope * 0.6 * 30, 2)
+    pred180 = round(last + slope * 0.25 * 180, 2)
+    trend = 'Bullish' if slope > 0.5 else ('Bearish' if slope < -0.5 else 'Neutral')
+    gains = losses = 0.0
+    for i in range(1, n):
+        diff = prices[i] - prices[i - 1]
+        if diff > 0:
+            gains += diff
+        else:
+            losses += abs(diff)
+    rs = 100 if losses == 0 else gains / losses
+    rsi = round(100 - (100 / (1 + rs)), 1)
+    return {
+        'pred1': pred1, 'pred3': pred3, 'pred7': pred7,
+        'pred30': pred30, 'pred180': pred180,
+        'trend': trend, 'sma3': round(sma3, 2), 'sma5': round(sma5, 2),
+        'rsi': rsi, 'slope': round(slope, 2),
+    }
+
+
 def get_dividends(sym):
     if not ALPHAVANTAGE_API_KEY:
         return None
@@ -202,6 +239,30 @@ KNOWN_COMPANIES = {
     'STARLINK':'TSLA', 'SPACEX':'TSLA',
 }
 
+def lookup_symbol_via_api(name_guess):
+    """Fallback for companies not in KNOWN_COMPANIES: ask Finnhub's free
+    symbol-lookup endpoint to resolve a company name/phrase to a real ticker.
+    This is what lets the chatbot answer for ANY company, not just the
+    pre-mapped list, without needing a paid LLM API."""
+    if not FINNHUB_API_KEY or not name_guess or len(name_guess) < 2:
+        return None
+    try:
+        d = requests.get(
+            f'https://finnhub.io/api/v1/search?q={name_guess}&token={FINNHUB_API_KEY}',
+            timeout=6).json()
+        results = d.get('result', [])
+        # Prefer "Common Stock" results on major US exchanges over warrants/ETFs/etc.
+        for r in results:
+            sym = r.get('symbol', '')
+            if r.get('type') == 'Common Stock' and '.' not in sym and sym.isascii():
+                return sym
+        if results:
+            return results[0].get('symbol')
+    except Exception:
+        pass
+    return None
+
+
 def extract_symbol(msg):
     up = msg.upper()
     # Sort by length descending so multi-word names match before short ones
@@ -221,6 +282,14 @@ def extract_symbol(msg):
         c = ''.join(x for x in word if x.isalpha())
         if 2 <= len(c) <= 5 and word.isupper() and c.upper() not in skip:
             return c.upper()
+    # Last resort: try the longest capitalized word/phrase as a company name
+    # against Finnhub's live symbol search, so unknown companies still work.
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z&.\-']*", msg) if w.upper() not in skip]
+    if words:
+        guess = max(words, key=len)
+        looked_up = lookup_symbol_via_api(guess)
+        if looked_up:
+            return looked_up
     return None
 
 
@@ -282,6 +351,7 @@ def chat():
         history   = get_history(sym)
         dividends = get_dividends(sym)
         news      = get_news(sym)
+        pred      = calc_prediction(history['prices']) if history else None
 
         ml   = msg.lower()
         name = profile['name'] if profile else sym
@@ -296,15 +366,63 @@ def chat():
                 'status': 'no_key'
             })
 
-        long_range = any(w in ml for w in ['month', 'months', 'year', 'years', '6 month', 'half year'])
+        # Detect an explicit horizon in the question: "180 days", "6 months", "1 year"
+        horizon_days = None
+        m_days = re.search(r'(\d+)\s*day', ml)
+        m_months = re.search(r'(\d+)\s*month', ml)
+        m_years = re.search(r'(\d+)\s*year', ml)
+        if m_days:
+            horizon_days = int(m_days.group(1))
+        elif m_months:
+            horizon_days = int(m_months.group(1)) * 30
+        elif m_years:
+            horizon_days = int(m_years.group(1)) * 365
+        elif 'next year' in ml:
+            horizon_days = 365
+        elif '6 month' in ml or 'half year' in ml or 'half-year' in ml:
+            horizon_days = 180
 
-        if long_range:
-            ai = (f"For <b>{name} ({sym})</b>, see the <b>30-Day</b> and <b>6-Month</b> estimates "
-                  f"in the AI Price Prediction section below. These are rough trend-based "
-                  f"extrapolations from the last 10 days of data — "
-                  f"<b>long-range forecasts like this carry low confidence</b> since real "
-                  f"prices are driven by earnings, news, and macro events this simple model "
-                  f"can't see. <b>This is NOT financial advice.</b>")
+        long_range = horizon_days is not None or any(
+            w in ml for w in ['month', 'months', 'year', 'years'])
+
+        if long_range and pred and price:
+            # Pick the closest pre-computed estimate to the requested horizon,
+            # then build a wider sentiment-based RANGE around it (not a single
+            # point estimate) so the answer reads like a realistic forecast band.
+            if horizon_days is None:
+                horizon_days = 180
+            if horizon_days <= 1:
+                point = pred['pred1']
+            elif horizon_days <= 3:
+                point = pred['pred3']
+            elif horizon_days <= 7:
+                point = pred['pred7']
+            elif horizon_days <= 30:
+                point = pred['pred30']
+            else:
+                point = pred['pred180']
+
+            # Widen the band further out in time — short horizons stay tight,
+            # long horizons (6mo/1yr) get a noticeably wider, more honest range.
+            spread_pct = min(0.04 + (horizon_days / 365) * 0.18, 0.22)
+            low  = round(point * (1 - spread_pct), 2)
+            high = round(point * (1 + spread_pct), 2)
+            if low > high:
+                low, high = high, low
+
+            horizon_label = (f"{horizon_days} days" if horizon_days < 60
+                              else f"{round(horizon_days/30)} months" if horizon_days < 400
+                              else f"{round(horizon_days/365,1)} years")
+
+            ai = (f"As per current market sentiment, <b>{name} ({sym})</b> stock price in the "
+                  f"next {horizon_label} will likely be approx "
+                  f"<b>${low} to ${high}</b> "
+                  f"(trend: <b>{pred['trend']}</b>). "
+                  f"This is a rough estimate from a simple moving-average model on the last "
+                  f"10 days of data — <b>confidence drops sharply over longer horizons</b> "
+                  f"since real prices are driven by earnings, news, and macro events this "
+                  f"model can't see. See the AI Price Prediction section below for the full "
+                  f"breakdown. <b>This is NOT financial advice.</b>")
         elif 'buy' in ml or 'should' in ml:
             ai = (f"Based on current data, {name} ({sym}) is trading at "
                   f"${price['price'] if price else 'N/A'}. "
@@ -338,6 +456,7 @@ def chat():
             'dividends':   dividends,
             'news':        news,
             'compare_with': compare_hint,
+            'prediction':  pred,
         })
 
     except Exception as e:
@@ -367,4 +486,3 @@ if __name__ == '__main__':
     print(f"Finnhub API key:      {'SET ✓' if FINNHUB_API_KEY else 'MISSING ✗'}")
     print(f"AlphaVantage API key: {'SET ✓' if ALPHAVANTAGE_API_KEY else 'MISSING ✗'}")
     app.run(host='0.0.0.0', port=port, debug=False)
-    
