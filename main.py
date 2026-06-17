@@ -327,12 +327,21 @@ def extract_symbol(msg):
     for name in sorted(KNOWN_COMPANIES.keys(), key=len, reverse=True):
         if name in up:
             return KNOWN_COMPANIES[name]
+
     skip = {'WHAT','SHOW','TELL','GIVE','WILL','SHOULD','ABOUT','PRICE','STOCK',
             'BUY','SELL','HOLD','THE','AND','FOR','WITH','THIS','THAT','NEXT',
             'DAYS','LAST','NEWS','DATA','INFO','GET','ME','IS','IN','OF','AT',
             'HOW','ANY','TODAY','WEEK','MONTH','YEAR','MARKET','WORTH','VALUE',
             'GOOD','BAD','VS','COMPARE','VERSUS','OR','BE','DO','SO','TO','BY',
-            'CAN','MAY','ARE','WAS','WERE'}
+            'CAN','MAY','ARE','WAS','WERE','MONTHS','YEARS','PLEASE','PREDICT',
+            'PREDICTION','FUTURE','CURRENT','NOW','GO','UP','DOWN','RATING',
+            'ANALYSIS','REPORT','INVEST','INVESTING','SHARES','SHARE',
+            'I','A','AN','ON','DOING','MY','YOUR','IT','ITS','AS','IF','WE',
+            'YOU','THEY','THEIR','OUR','MIGHT','WOULD','COULD','DOES','DID',
+            'HAS','HAVE','HAD','ALSO','JUST','LIKE','OK','OKAY','PLZ','PLS',
+            'KINDLY','LOOKING','LOOK','CHECK','FIND','SEARCH','OPINION',
+            'THINK','THOUGHT','GOING','TODAY','RIGHT','NOW','OVER','WITHIN'}
+
     # Only trust an ALL-CAPS standalone token in the ORIGINAL (non-uppercased)
     # message as a ticker guess — prevents random short words like "be" from
     # matching after .upper().
@@ -340,14 +349,26 @@ def extract_symbol(msg):
         c = ''.join(x for x in word if x.isalpha())
         if 2 <= len(c) <= 5 and word.isupper() and c.upper() not in skip:
             return c.upper()
-    # Last resort: try the longest capitalized word/phrase as a company name
-    # against Finnhub's live symbol search, so unknown companies still work.
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z&.\-']*", msg) if w.upper() not in skip]
-    if words:
-        guess = max(words, key=len)
-        looked_up = lookup_symbol_via_api(guess)
+
+    # Generic company-name resolution: strip question/filler words, then try
+    # the remaining run of words as ONE phrase against Finnhub's live symbol
+    # search. This handles multi-word companies not in KNOWN_COMPANIES, e.g.
+    # "Bank of America", "American Express", "Berkshire Hathaway", etc.
+    raw_words = re.findall(r"[A-Za-z][A-Za-z&.\-']*", msg)
+    meaningful = [w for w in raw_words if w.upper() not in skip]
+    if meaningful:
+        phrase = ' '.join(meaningful)
+        looked_up = lookup_symbol_via_api(phrase)
         if looked_up:
             return looked_up
+        # Phrase search found nothing — try the longest individual word as a
+        # fallback (handles single, slightly-misspelled, or unusual names).
+        guess = max(meaningful, key=len)
+        if guess.lower() != phrase.lower():
+            looked_up = lookup_symbol_via_api(guess)
+            if looked_up:
+                return looked_up
+
     return None
 
 
