@@ -159,6 +159,64 @@ def calc_prediction(prices):
     }
 
 
+def calc_signal(pred, current_price, target_price, news_list):
+    """Produce a simple Buy / Hold / Sell style suggestion for a given time
+    horizon, combining: (1) projected % move to the target price, (2) RSI
+    overbought/oversold zone, (3) trend direction, (4) news sentiment mix.
+    This is a rule-based heuristic for an educational project — NOT a real
+    trading signal."""
+    if not pred or not current_price or not target_price:
+        return None
+
+    pct_move = ((target_price - current_price) / current_price) * 100
+    score = 0
+
+    # 1. Projected move contributes the most weight
+    if pct_move > 5:
+        score += 2
+    elif pct_move > 1.5:
+        score += 1
+    elif pct_move < -5:
+        score -= 2
+    elif pct_move < -1.5:
+        score -= 1
+
+    # 2. RSI — overbought (>70) leans against buying more; oversold (<30) leans toward buying
+    rsi = pred.get('rsi', 50)
+    if rsi < 30:
+        score += 1
+    elif rsi > 70:
+        score -= 1
+
+    # 3. Trend direction
+    if pred.get('trend') == 'Bullish':
+        score += 1
+    elif pred.get('trend') == 'Bearish':
+        score -= 1
+
+    # 4. News sentiment mix (if available)
+    if news_list:
+        pos = sum(1 for x in news_list if x.get('sentiment') == 'Positive')
+        neg = sum(1 for x in news_list if x.get('sentiment') == 'Negative')
+        if pos > neg + 1:
+            score += 1
+        elif neg > pos + 1:
+            score -= 1
+
+    if score >= 3:
+        label, color = 'BUY', 'green'
+    elif score >= 1:
+        label, color = 'WEAK BUY', 'green'
+    elif score <= -3:
+        label, color = 'SELL', 'red'
+    elif score <= -1:
+        label, color = 'WEAK SELL', 'red'
+    else:
+        label, color = 'HOLD', 'yellow'
+
+    return {'label': label, 'color': color, 'score': score, 'pct_move': round(pct_move, 2)}
+
+
 def get_dividends(sym):
     if not ALPHAVANTAGE_API_KEY:
         return None
@@ -385,6 +443,12 @@ def chat():
         long_range = horizon_days is not None or any(
             w in ml for w in ['month', 'months', 'year', 'years'])
 
+        # Always compute a default short-term (7-day) signal for the response
+        # card, regardless of which text branch ends up being used below.
+        default_signal = (calc_signal(pred, price['price'], pred['pred7'], news)
+                           if (pred and price) else None)
+        response_signal = default_signal
+
         if long_range and pred and price:
             # Pick the closest pre-computed estimate to the requested horizon,
             # then build a wider sentiment-based RANGE around it (not a single
@@ -414,29 +478,41 @@ def chat():
                               else f"{round(horizon_days/30)} months" if horizon_days < 400
                               else f"{round(horizon_days/365,1)} years")
 
+            signal = calc_signal(pred, price['price'], point, news)
+            response_signal = signal
+            sig_html = ''
+            if signal:
+                sig_html = (f" Based on the projected move, RSI, trend, and news sentiment, "
+                             f"the suggestion for this horizon is "
+                             f"<b style='color:var(--{signal['color']})'>{signal['label']}</b>.")
+
             ai = (f"As per current market sentiment, <b>{name} ({sym})</b> stock price in the "
                   f"next {horizon_label} will likely be approx "
                   f"<b>${low} to ${high}</b> "
-                  f"(trend: <b>{pred['trend']}</b>). "
+                  f"(trend: <b>{pred['trend']}</b>).{sig_html} "
                   f"This is a rough estimate from a simple moving-average model on the last "
                   f"10 days of data — <b>confidence drops sharply over longer horizons</b> "
                   f"since real prices are driven by earnings, news, and macro events this "
                   f"model can't see. See the AI Price Prediction section below for the full "
                   f"breakdown. <b>This is NOT financial advice.</b>")
-        elif 'buy' in ml or 'should' in ml:
-            ai = (f"Based on current data, {name} ({sym}) is trading at "
-                  f"${price['price'] if price else 'N/A'}. "
+        elif 'buy' in ml or 'should' in ml or 'sell' in ml:
+            # Default to the 7-day horizon when no explicit timeframe is given
+            target = pred['pred7'] if pred else None
+            signal = calc_signal(pred, price['price'], target, news) if (pred and price) else None
+            response_signal = signal
+            sig_html = ''
+            if signal:
+                sig_html = (f" My short-term (7-day) suggestion is "
+                             f"<b style='color:var(--{signal['color']})'>{signal['label']}</b>, "
+                             f"based on trend, RSI, projected move, and news sentiment.")
+            ai = (f"{name} ({sym}) is currently trading at "
+                  f"${price['price'] if price else 'N/A'}.{sig_html} "
                   f"Review the fundamentals and news sentiment below before deciding. "
                   f"<b>This is NOT financial advice.</b>")
         elif compare_hint:
             ai = (f"Showing complete data for <b>{name} ({sym})</b> first. "
                   f"I've pre-filled <b>{compare_hint}</b> in the Compare box below "
                   f"— click Compare to see them side by side.")
-        elif 'sell' in ml:
-            ai = (f"{name} ({sym}) is currently at "
-                  f"${price['price'] if price else 'N/A'}. "
-                  f"Check the 10-day trend and sentiment indicators. "
-                  f"<b>This is NOT financial advice.</b>")
         elif 'vs' in ml or 'compare' in ml:
             ai = (f"Showing complete data for <b>{name} ({sym})</b>. "
                   f"Use the Compare box below to check it against another ticker.")
@@ -453,6 +529,7 @@ def chat():
             'profile':     profile,
             'metrics':     metrics,
             'chart_data':  history,
+            'signal':      response_signal,
             'dividends':   dividends,
             'news':        news,
             'compare_with': compare_hint,
