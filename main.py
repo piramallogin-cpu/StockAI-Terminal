@@ -103,6 +103,10 @@ def get_metrics(sym):
 
 
 def get_history(sym):
+    """Returns a dict with 'dates'/'prices' on success, or
+    {'error': '<reason>'} when AlphaVantage can't provide data (e.g. daily
+    rate limit hit) — distinct from None so callers can tell the two cases
+    apart and respond helpfully instead of silently dropping the chart."""
     if not ALPHAVANTAGE_API_KEY:
         return None
     try:
@@ -110,17 +114,23 @@ def get_history(sym):
             f'https://www.alphavantage.co/query?function=TIME_SERIES_DAILY'
             f'&symbol={sym}&outputsize=compact&apikey={ALPHAVANTAGE_API_KEY}',
             timeout=12).json()
+        # AlphaVantage returns these instead of an HTTP error code when the
+        # free-tier daily/per-minute quota is exhausted or the call is malformed.
+        if 'Note' in d or 'Information' in d:
+            return {'error': d.get('Note') or d.get('Information')}
+        if 'Error Message' in d:
+            return {'error': d.get('Error Message')}
         ts = d.get('Time Series (Daily)', {})
         if not ts:
-            return None
+            return {'error': 'No price history returned for this symbol.'}
         dates = sorted(ts.keys(), reverse=True)[:10]
         dates.reverse()
         return {
             'dates':  [x[5:] for x in dates],
             'prices': [round(float(ts[x]['4. close']), 2) for x in dates],
         }
-    except Exception:
-        return None
+    except Exception as e:
+        return {'error': f'History request failed: {e}'}
 
 
 def calc_prediction(prices):
@@ -424,13 +434,21 @@ def chat():
             sym = multi[0]
             compare_hint = multi[1]
 
-        price     = get_price(sym)
-        profile   = get_profile(sym)
-        metrics   = get_metrics(sym)
-        history   = get_history(sym)
-        dividends = get_dividends(sym)
-        news      = get_news(sym)
-        pred      = calc_prediction(history['prices']) if history else None
+        price        = get_price(sym)
+        profile      = get_profile(sym)
+        metrics      = get_metrics(sym)
+        history_raw  = get_history(sym)
+        dividends    = get_dividends(sym)
+        news         = get_news(sym)
+
+        history_error = None
+        history = None
+        if history_raw and 'error' in history_raw:
+            history_error = history_raw['error']
+        elif history_raw:
+            history = history_raw
+
+        pred = calc_prediction(history['prices']) if history else None
 
         ml   = msg.lower()
         name = profile['name'] if profile else sym
@@ -470,7 +488,16 @@ def chat():
                            if (pred and price) else None)
         response_signal = default_signal
 
-        if long_range and pred and price:
+        if long_range and history_error:
+            ai = (f"I can't generate a price prediction for <b>{name} ({sym})</b> right now — "
+                  f"the price-history data provider returned: "
+                  f"<i>\"{history_error}\"</i>. "
+                  f"This usually means the free AlphaVantage API's <b>daily request limit "
+                  f"(25 calls/day) has been reached</b> from repeated testing. "
+                  f"It resets automatically after 24 hours, or you can use a fresh "
+                  f"AlphaVantage API key. Live price and fundamentals below are still "
+                  f"accurate since they come from a separate provider (Finnhub).")
+        elif long_range and pred and price:
             # Pick the closest pre-computed estimate to the requested horizon,
             # then build a wider sentiment-based RANGE around it (not a single
             # point estimate) so the answer reads like a realistic forecast band.
@@ -554,6 +581,7 @@ def chat():
             'dividends':   dividends,
             'news':        news,
             'compare_with': compare_hint,
+            'history_error': history_error,
             'prediction':  pred,
         })
 
